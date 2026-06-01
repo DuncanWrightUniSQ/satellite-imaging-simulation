@@ -11,6 +11,7 @@ A deployable Streamlit interface for simulating small-satellite pointing error, 
 - Save/load pointing simulations as `.npz` files.
 - Starfield rendering with telescope, sensor, target-field, background, preview, and GIF controls.
 - Exposure-integrated star motion for jitter/drift trails.
+- Lightweight target-centroid alignment and stacking using NumPy/Pillow only.
 - Online catalog queries against APASS and Gaia TAP services, with a synthetic fallback for offline demos.
 - Grayscale preview/GIF rendering with an embedded arcsecond scale bar.
 

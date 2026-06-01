@@ -237,6 +237,29 @@ def render_preview_frame(
     return _render_frame_integrated(stats, imaging, render, scene, render.start_time, rng), scene
 
 
+def render_frame_sequence(
+    stats: PointingStats,
+    imaging: ImagingOptions,
+    target: TargetOptions,
+    render: RenderOptions,
+    duration: float,
+    max_frames: int,
+) -> tuple[np.ndarray, SceneMeta]:
+    scene = build_scene(imaging, target)
+    requested_frames = max(1, int(round(duration / render.frame_exposure)))
+    n_frames = min(requested_frames, max(1, int(max_frames)))
+    available = max(0.0, float(stats.t[-1] - render.start_time))
+    max_possible = max(1, int(np.floor(available / render.frame_exposure)))
+    n_frames = min(n_frames, max_possible)
+
+    rng = np.random.default_rng(12345)
+    frames = []
+    for k in range(n_frames):
+        frame_start = render.start_time + k * render.frame_exposure
+        frames.append(_render_frame_integrated(stats, imaging, render, scene, frame_start, rng))
+    return np.asarray(frames, dtype=float), scene
+
+
 def make_starfield_gif(
     stats: PointingStats,
     imaging: ImagingOptions,

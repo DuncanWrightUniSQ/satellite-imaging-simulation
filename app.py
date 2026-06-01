@@ -4,6 +4,7 @@ from io import BytesIO
 import pandas as pd
 import streamlit as st
 
+from satellite_sim.alignment import align_target_centroid, frame_png, frames_to_gif_bytes, overlay_centroid_png
 from satellite_sim.catalog import CatalogOptions
 from satellite_sim.pointing import PointingOptions, load_pointing_npz, rpe_p99_from_series, save_pointing_npz, simulate_pointing
 from satellite_sim.rendering import (
@@ -12,6 +13,7 @@ from satellite_sim.rendering import (
     RenderOptions,
     TargetOptions,
     make_starfield_gif,
+    render_frame_sequence,
     render_preview_frame,
 )
 from satellite_sim.visuals import image_to_png_bytes, trajectory_png, timeseries_png
@@ -112,7 +114,7 @@ with st.sidebar:
     st.header("Workflow")
     mode = st.radio("Pointing source", ["Simulate new pointing", "Load previous pointing"], index=0)
 
-tabs = st.tabs(["Pointing", "Imaging Payload", "Target Field", "Render & Download"])
+tabs = st.tabs(["Pointing", "Imaging Payload", "Target Field", "Render & Download", "Alignment & Stacking"])
 
 if "pointing_stats" not in st.session_state:
     st.session_state.pointing_stats = None
@@ -120,6 +122,14 @@ if "last_gif" not in st.session_state:
     st.session_state.last_gif = None
 if "last_frame_png" not in st.session_state:
     st.session_state.last_frame_png = None
+if "alignment_result" not in st.session_state:
+    st.session_state.alignment_result = None
+if "alignment_meta" not in st.session_state:
+    st.session_state.alignment_meta = None
+if "aligned_gif" not in st.session_state:
+    st.session_state.aligned_gif = None
+if "aligned_stack_png" not in st.session_state:
+    st.session_state.aligned_stack_png = None
 
 with tabs[0]:
     left, right = st.columns([0.34, 0.66], gap="large")
@@ -396,3 +406,92 @@ with tabs[3]:
                 if meta:
                     st.caption(f"{meta.catalog_name}; {len(meta.stars)} stars; plate scale {meta.plate_arcsec_per_pix:.3f} arcsec/px")
                 st.download_button("Download GIF", st.session_state.last_gif, "starfield_pointing.gif", "image/gif")
+
+with tabs[4]:
+    stats = st.session_state.pointing_stats
+    c1, c2, c3 = st.columns(3, gap="large")
+    with c1:
+        st.subheader("Input Sequence")
+        align_duration = st.number_input("Alignment sequence duration (s)", min_value=0.001, value=1.0, step=0.5, key="align_duration")
+        align_max_frames = st.number_input("Maximum alignment frames", min_value=1, max_value=200, value=20, step=1, key="align_max_frames")
+        align_fps = st.number_input("Aligned GIF FPS", min_value=1.0, max_value=60.0, value=10.0, step=1.0, key="align_fps")
+    with c2:
+        st.subheader("Centroid Tracking")
+        align_mode = st.selectbox("Alignment mode", ["Target centroid (x/y shift)", "Multi-star rotation (coming later)"], index=0, key="align_mode")
+        search_box_size = st.number_input("Centroid search box (px)", min_value=8, max_value=1000, value=96, step=8, key="align_search_box")
+        threshold_sigma = st.number_input("Centroid threshold (sigma)", min_value=0.0, max_value=20.0, value=3.0, step=0.5, key="align_threshold_sigma")
+    with c3:
+        st.subheader("Alignment Output")
+        reference_index = st.number_input("Reference frame index", min_value=0, max_value=199, value=0, step=1, key="align_reference_index")
+        shift_mode_label = st.selectbox("Shift mode", ["Subpixel bilinear", "Integer pixels, fastest"], index=0, key="align_shift_mode")
+        stack_method_label = st.selectbox("Stack method", ["mean", "sum", "max"], index=0, key="align_stack_method")
+
+    if not target_valid:
+        st.info("Enter a valid target RA/Dec before rendering an alignment sequence.")
+    elif stats is None:
+        st.info("Run or load pointing first, then render and align an image sequence.")
+    elif align_mode != "Target centroid (x/y shift)":
+        st.info("Multi-star translation/rotation is planned next. The first implemented mode is target-centroid x/y alignment.")
+    else:
+        if st.button("Render & Align Sequence", type="primary", width="stretch"):
+            with st.spinner("Rendering sequence and aligning target centroid..."):
+                frames, meta = render_frame_sequence(stats, imaging, target, render_opts, align_duration, int(align_max_frames))
+                result = align_target_centroid(
+                    frames,
+                    reference_index=int(reference_index),
+                    search_box_size=int(search_box_size),
+                    threshold_sigma=float(threshold_sigma),
+                    shift_mode="integer" if shift_mode_label.startswith("Integer") else "bilinear",
+                    stack_method=stack_method_label,
+                )
+                st.session_state.alignment_result = result
+                st.session_state.alignment_meta = meta
+                st.session_state.aligned_gif = frames_to_gif_bytes(
+                    result.aligned_frames,
+                    render_opts,
+                    fps=align_fps,
+                    plate_arcsec_per_pix=meta.plate_arcsec_per_pix,
+                )
+                st.session_state.aligned_stack_png = frame_png(result.stack, render_opts, meta.plate_arcsec_per_pix)
+
+        result = st.session_state.alignment_result
+        meta = st.session_state.alignment_meta
+        if result is not None and meta is not None:
+            n_frames = result.original_frames.shape[0]
+            frame_idx = st.slider("Frame", min_value=0, max_value=n_frames - 1, value=0, step=1)
+            row = {
+                "frame": frame_idx,
+                "centroid_x": result.centroids_xy[frame_idx, 0],
+                "centroid_y": result.centroids_xy[frame_idx, 1],
+                "shift_x": result.shifts_xy[frame_idx, 0],
+                "shift_y": result.shifts_xy[frame_idx, 1],
+                "centroid_found": bool(result.found[frame_idx]),
+            }
+            st.dataframe(pd.DataFrame([row]), hide_index=True, width="stretch")
+
+            left, mid, right = st.columns(3, gap="large")
+            with left:
+                st.image(
+                    overlay_centroid_png(
+                        result.original_frames[frame_idx],
+                        tuple(result.centroids_xy[frame_idx]),
+                        render_opts,
+                        meta.plate_arcsec_per_pix,
+                    ),
+                    caption="Original frame with centroid",
+                    width="stretch",
+                )
+            with mid:
+                st.image(
+                    frame_png(result.aligned_frames[frame_idx], render_opts, meta.plate_arcsec_per_pix),
+                    caption="Aligned frame",
+                    width="stretch",
+                )
+            with right:
+                st.image(st.session_state.aligned_stack_png, caption=f"{stack_method_label.title()} stack", width="stretch")
+
+            cdl, cdm = st.columns(2)
+            with cdl:
+                st.download_button("Download Aligned GIF", st.session_state.aligned_gif, "aligned_sequence.gif", "image/gif")
+            with cdm:
+                st.download_button("Download Stacked PNG", st.session_state.aligned_stack_png, "aligned_stack.png", "image/png")
