@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace as dc_replace
 from io import BytesIO
 import pandas as pd
 import streamlit as st
@@ -12,10 +13,12 @@ from satellite_sim.rendering import (
     ImagingOptions,
     RenderOptions,
     TargetOptions,
+    build_scene,
     frames_to_gif,
     render_frame_sequence,
     render_preview_frame,
 )
+from satellite_sim.timeseries import parse_delta_magnitudes, run_astronomical_timeseries
 from satellite_sim.visuals import image_to_png_bytes, trajectory_png, timeseries_png
 
 
@@ -114,7 +117,16 @@ with st.sidebar:
     st.header("Workflow")
     mode = st.radio("Pointing source", ["Simulate new pointing", "Load previous pointing"], index=0)
 
-tabs = st.tabs(["Pointing", "Imaging Payload", "Target Field", "Render & Download", "Alignment & Stacking"])
+tabs = st.tabs(
+    [
+        "Pointing",
+        "Imaging Payload",
+        "Target Field",
+        "Render & Download",
+        "Alignment & Stacking",
+        "Astronomical Timeseries",
+    ]
+)
 
 if "pointing_stats" not in st.session_state:
     st.session_state.pointing_stats = None
@@ -134,6 +146,10 @@ if "last_render_frames" not in st.session_state:
     st.session_state.last_render_frames = None
 if "last_render_meta" not in st.session_state:
     st.session_state.last_render_meta = None
+if "astro_product" not in st.session_state:
+    st.session_state.astro_product = None
+if "astro_preview_gif" not in st.session_state:
+    st.session_state.astro_preview_gif = None
 
 with tabs[0]:
     left, right = st.columns([0.34, 0.66], gap="large")
@@ -529,3 +545,182 @@ with tabs[4]:
                 st.download_button("Download Aligned GIF", st.session_state.aligned_gif, "aligned_sequence.gif", "image/gif")
             with cdm:
                 st.download_button("Download Stacked PNG", st.session_state.aligned_stack_png, "aligned_stack.png", "image/png")
+
+with tabs[5]:
+    stats = st.session_state.pointing_stats
+    c1, c2, c3 = st.columns(3, gap="large")
+    with c1:
+        st.subheader("Long Run")
+        astro_total_duration = st.number_input(
+            "Astronomical timeseries duration (s)",
+            min_value=0.001,
+            max_value=86400.0,
+            value=1800.0,
+            step=600.0,
+            key="astro_total_duration",
+        )
+        astro_frames_per_stack = st.number_input(
+            "Simulated frames per stacked image",
+            min_value=1,
+            max_value=1000,
+            value=20,
+            step=1,
+            key="astro_frames_per_stack",
+            help="Each output image is made by rendering this many short-exposure frames, aligning them, and stacking them.",
+        )
+        astro_max_outputs = st.number_input(
+            "Maximum output stacked images",
+            min_value=1,
+            max_value=5000,
+            value=100,
+            step=10,
+            key="astro_max_outputs",
+        )
+    with c2:
+        st.subheader("Target Variability")
+        astro_delta_text = st.text_area(
+            "Delta magnitudes",
+            value="",
+            height=120,
+            key="astro_delta_text",
+            help="Optional whitespace- or comma-separated list. Positive values make the target star fainter. If supplied, the list length must equal the output image count.",
+        )
+        astro_delta_file = st.file_uploader("Upload delta magnitudes CSV/TXT", type=["csv", "txt"], key="astro_delta_file")
+        astro_fresh_pointing = st.toggle(
+            "Simulate fresh long pointing for this run",
+            value=True,
+            key="astro_fresh_pointing",
+            help="Uses the current pointing parameters as a template, but extends the run to cover this whole astronomical timeseries.",
+        )
+    with c3:
+        st.subheader("Output")
+        astro_output_dir = st.text_input(
+            "Output directory path",
+            value="",
+            key="astro_output_dir",
+            help="Optional local/server directory. For large runs this avoids holding every output in browser memory.",
+        )
+        astro_make_zip = st.toggle(
+            "Create downloadable ZIP",
+            value=True,
+            key="astro_make_zip",
+            help="Convenient for small to medium runs. For very large products, prefer writing to an output directory.",
+        )
+        astro_shift_mode_label = st.selectbox(
+            "Timeseries shift mode",
+            ["Subpixel bilinear", "Integer pixels, fastest"],
+            index=0,
+            key="astro_shift_mode",
+        )
+
+    astro_cadence = float(frame_exposure) * int(astro_frames_per_stack)
+    astro_expected_outputs = min(
+        max(1, int(astro_max_outputs)),
+        max(1, int((astro_total_duration / max(astro_cadence, 1e-12)) + 1e-9)),
+    )
+    st.caption(
+        f"Cadence: {astro_cadence:.4g} s per stacked image; this run will produce {astro_expected_outputs} stacked outputs. "
+        "The target star is the catalog star nearest the requested field center."
+    )
+
+    delta_source = ""
+    if astro_delta_file is not None:
+        delta_source = astro_delta_file.getvalue().decode("utf-8", errors="replace")
+    elif astro_delta_text.strip():
+        delta_source = astro_delta_text
+
+    if delta_source:
+        try:
+            parsed_delta_preview = parse_delta_magnitudes(delta_source)
+            st.caption(f"Parsed {len(parsed_delta_preview)} delta-magnitude values.")
+        except ValueError as exc:
+            st.error(f"Could not parse delta magnitudes: {exc}")
+
+    if not target_valid:
+        st.info("Enter a valid target RA/Dec before running an astronomical timeseries.")
+    elif stats is None:
+        st.info("Run or load a pointing simulation first. The timeseries tab uses it as the pointing model template.")
+    else:
+        if astro_expected_outputs > 300 and astro_make_zip:
+            st.warning("A ZIP with hundreds or thousands of float TIFFs may be large. For big runs, use an output directory and turn the ZIP off.")
+
+        if st.button("Run Astronomical Timeseries", type="primary", width="stretch"):
+            try:
+                deltas = parse_delta_magnitudes(delta_source) if delta_source else None
+                required_end = float(start_time) + float(astro_total_duration) + float(frame_exposure)
+                run_stats = stats
+                if astro_fresh_pointing:
+                    long_opts = dc_replace(stats.options, duration=required_end)
+                    run_stats = simulate_pointing(long_opts)
+                elif float(stats.t[-1]) < required_end:
+                    st.error(
+                        f"The current pointing simulation ends at {float(stats.t[-1]):.2f} s, "
+                        f"but this timeseries needs {required_end:.2f} s. Enable fresh long pointing or run a longer pointing simulation."
+                    )
+                    st.stop()
+
+                with st.spinner("Rendering, aligning, stacking, and writing the astronomical timeseries..."):
+                    scene = build_scene(imaging, target)
+                    progress = st.progress(0, text="Starting astronomical timeseries...")
+                    product = run_astronomical_timeseries(
+                        run_stats,
+                        imaging,
+                        render_opts,
+                        scene,
+                        total_duration=float(astro_total_duration),
+                        frames_per_stack=int(astro_frames_per_stack),
+                        max_outputs=int(astro_max_outputs),
+                        delta_magnitudes=deltas,
+                        search_box_size=int(search_box_size),
+                        threshold_sigma=float(threshold_sigma),
+                        shift_mode="integer" if astro_shift_mode_label.startswith("Integer") else "bilinear",
+                        stack_method=stack_method_label,
+                        output_dir=astro_output_dir.strip() or None,
+                        make_zip=bool(astro_make_zip),
+                        progress_callback=lambda done, total: progress.progress(
+                            done / total,
+                            text=f"Processed {done}/{total} stacked outputs",
+                        ),
+                    )
+                    progress.empty()
+                    st.session_state.astro_product = product
+                    st.session_state.astro_preview_gif = (
+                        frames_to_gif_bytes(product.preview_stacks, render_opts, fps=4.0, plate_arcsec_per_pix=scene.plate_arcsec_per_pix)
+                        if product.preview_stacks.size
+                        else None
+                    )
+            except ValueError as exc:
+                st.error(str(exc))
+
+        product = st.session_state.astro_product
+        if product is not None:
+            st.success(f"Created {product.n_outputs} stacked astronomical-timeseries images.")
+            if product.output_dir:
+                st.caption(f"Wrote float TIFF images and metadata to `{product.output_dir}`.")
+            if product.target_index is None:
+                st.warning("No catalog stars were available, so no target-star delta magnitude could be applied.")
+
+            if product.preview_stacks.size:
+                idx = st.slider("Preview stacked image", 0, product.preview_stacks.shape[0] - 1, 0, key="astro_preview_idx")
+                st.image(frame_png(product.preview_stacks[idx], render_opts), caption="Preview stack", width="stretch")
+                if st.session_state.astro_preview_gif:
+                    st.image(st.session_state.astro_preview_gif, caption="Preview of first stacks", width="stretch")
+
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                st.download_button(
+                    "Download Metadata CSV",
+                    product.metadata_csv,
+                    "astro_timeseries_metadata.csv",
+                    "text/csv",
+                    width="stretch",
+                )
+            with dl2:
+                if product.zip_bytes is not None:
+                    st.download_button(
+                        "Download Float TIFF ZIP",
+                        product.zip_bytes,
+                        "astro_timeseries_float_tiffs.zip",
+                        "application/zip",
+                        width="stretch",
+                    )

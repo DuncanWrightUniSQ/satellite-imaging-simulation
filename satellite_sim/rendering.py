@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 
 import numpy as np
@@ -97,6 +97,14 @@ def build_scene(imaging: ImagingOptions, target: TargetOptions) -> SceneMeta:
     bg_rate = phi_bg_as2 * pix_as2 * area_m2 * imaging.qe
 
     return SceneMeta(stars, stars.name, plate, bg_rate, x0_pix, y0_pix, e_star_per_s, sigma_pix, half_win)
+
+
+def target_star_index(scene: SceneMeta, imaging: ImagingOptions) -> int | None:
+    if scene.x0_pix.size == 0:
+        return None
+    dx = scene.x0_pix - imaging.nx / 2.0
+    dy = scene.y0_pix - imaging.ny / 2.0
+    return int(np.argmin(dx * dx + dy * dy))
 
 
 def _crop_bounds(imaging: ImagingOptions, half_subframe: int) -> tuple[np.ndarray, np.ndarray]:
@@ -246,18 +254,45 @@ def render_frame_sequence(
     max_frames: int,
 ) -> tuple[np.ndarray, SceneMeta]:
     scene = build_scene(imaging, target)
+    frames = render_frame_sequence_from_scene(stats, imaging, render, scene, duration, max_frames)
+    return frames, scene
+
+
+def render_frame_sequence_from_scene(
+    stats: PointingStats,
+    imaging: ImagingOptions,
+    render: RenderOptions,
+    scene: SceneMeta,
+    duration: float,
+    max_frames: int,
+    *,
+    start_time: float | None = None,
+    target_delta_mag: float = 0.0,
+    target_index: int | None = None,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
     requested_frames = max(1, int(round(duration / render.frame_exposure)))
     n_frames = min(requested_frames, max(1, int(max_frames)))
-    available = max(0.0, float(stats.t[-1] - render.start_time))
+    render_start = render.start_time if start_time is None else float(start_time)
+    available = max(0.0, float(stats.t[-1] - render_start))
     max_possible = max(1, int(np.floor(available / render.frame_exposure)))
     n_frames = min(n_frames, max_possible)
 
-    rng = np.random.default_rng(12345)
+    render_scene = scene
+    if target_delta_mag != 0.0:
+        idx = target_star_index(scene, imaging) if target_index is None else target_index
+        if idx is not None and 0 <= idx < scene.e_star_per_s.size:
+            e_star_per_s = scene.e_star_per_s.copy()
+            e_star_per_s[idx] *= 10.0 ** (-0.4 * float(target_delta_mag))
+            render_scene = replace(scene, e_star_per_s=e_star_per_s)
+
+    if rng is None:
+        rng = np.random.default_rng(12345)
     frames = []
     for k in range(n_frames):
-        frame_start = render.start_time + k * render.frame_exposure
-        frames.append(_render_frame_integrated(stats, imaging, render, scene, frame_start, rng))
-    return np.asarray(frames, dtype=float), scene
+        frame_start = render_start + k * render.frame_exposure
+        frames.append(_render_frame_integrated(stats, imaging, render, render_scene, frame_start, rng))
+    return np.asarray(frames, dtype=float)
 
 
 def make_starfield_gif(

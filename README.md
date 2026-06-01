@@ -12,6 +12,7 @@ A deployable Streamlit interface for simulating small-satellite pointing error, 
 - Starfield rendering with telescope, sensor, target-field, background, preview, and GIF controls.
 - Exposure-integrated star motion for jitter/drift trails.
 - Lightweight target-centroid alignment and stacking using NumPy/Pillow only, with generated-sequence and uploaded-GIF inputs.
+- Astronomical timeseries simulation that renders repeated short sequences, applies optional target-star delta magnitudes, aligns/stacks each cadence, and writes float TIFF products.
 - Online catalog queries against APASS and Gaia TAP services, with a synthetic fallback for offline demos.
 - Grayscale preview/GIF rendering with an embedded arcsecond scale bar.
 
@@ -65,7 +66,8 @@ Streamlit Cloud will install packages from `requirements.txt` automatically.
 
 - Catalog mode uses APASS/Gaia stars only; resolved objects such as galaxies are not rendered.
 - Synthetic fallback is intended for offline demonstrations and repeatable tests.
-- Large sensors, long GIF durations, and faint magnitude limits can be CPU intensive.
+- Large sensors, long GIF durations, long astronomical timeseries, and faint magnitude limits can be CPU intensive.
+- Astronomical timeseries outputs are 32-bit float TIFF images plus a metadata CSV; use an output directory for very large runs.
 
 ## License
 
