@@ -19,6 +19,20 @@ class AlignmentResult:
     found: np.ndarray
 
 
+def gif_bytes_to_frames(data: bytes, max_frames: int | None = None) -> np.ndarray:
+    frames: list[np.ndarray] = []
+    with Image.open(BytesIO(data)) as img:
+        n = getattr(img, "n_frames", 1)
+        limit = n if max_frames is None else min(n, int(max_frames))
+        for i in range(limit):
+            img.seek(i)
+            gray = img.convert("L")
+            frames.append(np.asarray(gray, dtype=float))
+    if not frames:
+        raise ValueError("No frames found in GIF.")
+    return np.stack(frames, axis=0)
+
+
 def robust_centroid(
     frame: np.ndarray,
     center_xy: tuple[float, float] | None,

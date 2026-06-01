@@ -267,19 +267,14 @@ def make_starfield_gif(
     render: RenderOptions,
     gif: GifOptions,
 ) -> tuple[bytes, SceneMeta]:
-    scene = build_scene(imaging, target)
-    requested_frames = max(1, int(round(gif.duration / render.frame_exposure)))
-    n_frames = min(requested_frames, gif.max_frames)
-    available = max(0.0, float(stats.t[-1] - render.start_time))
-    max_possible = max(1, int(np.floor(available / render.frame_exposure)))
-    n_frames = min(n_frames, max_possible)
+    frame_array, scene = render_frame_sequence(stats, imaging, target, render, gif.duration, gif.max_frames)
+    return frames_to_gif(frame_array, render, gif.fps), scene
 
-    rng = np.random.default_rng(54321)
+
+def frames_to_gif(frame_array: np.ndarray, render: RenderOptions, fps: float) -> bytes:
     frames: list[Image.Image] = []
     fixed_limits: tuple[float, float] | None = None
-    for k in range(n_frames):
-        frame_start = render.start_time + k * render.frame_exposure
-        frame = _render_frame_integrated(stats, imaging, render, scene, frame_start, rng)
+    for frame in frame_array:
         if render.stretch == "fixed":
             fixed_limits = render.fixed_clim
         elif fixed_limits is None:
@@ -287,6 +282,6 @@ def make_starfield_gif(
         frames.append(frame_to_image(frame, render, fixed_limits).convert("P", palette=Image.Palette.ADAPTIVE))
 
     buf = BytesIO()
-    duration_ms = int(round(1000.0 / gif.fps))
+    duration_ms = int(round(1000.0 / max(fps, 1e-6)))
     frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:], duration=duration_ms, loop=0)
-    return buf.getvalue(), scene
+    return buf.getvalue()

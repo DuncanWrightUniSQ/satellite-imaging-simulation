@@ -4,7 +4,7 @@ from io import BytesIO
 import pandas as pd
 import streamlit as st
 
-from satellite_sim.alignment import align_target_centroid, frame_png, frames_to_gif_bytes, overlay_centroid_png
+from satellite_sim.alignment import align_target_centroid, frame_png, frames_to_gif_bytes, gif_bytes_to_frames, overlay_centroid_png
 from satellite_sim.catalog import CatalogOptions
 from satellite_sim.pointing import PointingOptions, load_pointing_npz, rpe_p99_from_series, save_pointing_npz, simulate_pointing
 from satellite_sim.rendering import (
@@ -12,7 +12,7 @@ from satellite_sim.rendering import (
     ImagingOptions,
     RenderOptions,
     TargetOptions,
-    make_starfield_gif,
+    frames_to_gif,
     render_frame_sequence,
     render_preview_frame,
 )
@@ -130,6 +130,10 @@ if "aligned_gif" not in st.session_state:
     st.session_state.aligned_gif = None
 if "aligned_stack_png" not in st.session_state:
     st.session_state.aligned_stack_png = None
+if "last_render_frames" not in st.session_state:
+    st.session_state.last_render_frames = None
+if "last_render_meta" not in st.session_state:
+    st.session_state.last_render_meta = None
 
 with tabs[0]:
     left, right = st.columns([0.34, 0.66], gap="large")
@@ -389,9 +393,12 @@ with tabs[3]:
                     st.session_state.last_frame_meta = meta
             if gif_clicked:
                 with st.spinner("Rendering GIF frames..."):
-                    gif_bytes, meta = make_starfield_gif(stats, imaging, target, render_opts, gif_opts)
+                    frames_for_gif, meta = render_frame_sequence(stats, imaging, target, render_opts, gif_duration, int(max_frames))
+                    gif_bytes = frames_to_gif(frames_for_gif, render_opts, gif_opts.fps)
                     st.session_state.last_gif = gif_bytes
                     st.session_state.last_gif_meta = meta
+                    st.session_state.last_render_frames = frames_for_gif
+                    st.session_state.last_render_meta = meta
 
             if st.session_state.last_frame_png:
                 st.image(st.session_state.last_frame_png, caption="Latest grayscale preview", width="stretch")
@@ -412,6 +419,15 @@ with tabs[4]:
     c1, c2, c3 = st.columns(3, gap="large")
     with c1:
         st.subheader("Input Sequence")
+        input_source = st.radio(
+            "Alignment input",
+            ["Render from current simulation", "Use current rendered sequence", "Upload GIF"],
+            index=0,
+            key="align_input_source",
+        )
+        uploaded_align_gif = None
+        if input_source == "Upload GIF":
+            uploaded_align_gif = st.file_uploader("Upload GIF for alignment", type=["gif"], key="align_gif_upload")
         align_duration = st.number_input("Alignment sequence duration (s)", min_value=0.001, value=1.0, step=0.5, key="align_duration")
         align_max_frames = st.number_input("Maximum alignment frames", min_value=1, max_value=200, value=20, step=1, key="align_max_frames")
         align_fps = st.number_input("Aligned GIF FPS", min_value=1.0, max_value=60.0, value=10.0, step=1.0, key="align_fps")
@@ -426,16 +442,33 @@ with tabs[4]:
         shift_mode_label = st.selectbox("Shift mode", ["Subpixel bilinear", "Integer pixels, fastest"], index=0, key="align_shift_mode")
         stack_method_label = st.selectbox("Stack method", ["mean", "sum", "max"], index=0, key="align_stack_method")
 
-    if not target_valid:
+    can_align_without_sim = input_source == "Upload GIF" and uploaded_align_gif is not None
+    can_align_current_sequence = input_source == "Use current rendered sequence" and st.session_state.last_render_frames is not None
+
+    if input_source == "Render from current simulation" and not target_valid:
         st.info("Enter a valid target RA/Dec before rendering an alignment sequence.")
-    elif stats is None:
+    elif input_source == "Render from current simulation" and stats is None:
         st.info("Run or load pointing first, then render and align an image sequence.")
+    elif input_source == "Use current rendered sequence" and not can_align_current_sequence:
+        st.info("Render a GIF in the Render & Download tab first, then this option will reuse that generated frame sequence.")
+    elif input_source == "Upload GIF" and not can_align_without_sim:
+        st.info("Upload a GIF to align and stack its frames.")
     elif align_mode != "Target centroid (x/y shift)":
         st.info("Multi-star translation/rotation is planned next. The first implemented mode is target-centroid x/y alignment.")
     else:
         if st.button("Render & Align Sequence", type="primary", width="stretch"):
             with st.spinner("Rendering sequence and aligning target centroid..."):
-                frames, meta = render_frame_sequence(stats, imaging, target, render_opts, align_duration, int(align_max_frames))
+                if input_source == "Upload GIF":
+                    frames = gif_bytes_to_frames(uploaded_align_gif.getvalue(), int(align_max_frames))
+                    meta = None
+                    plate_scale_for_display = None
+                elif input_source == "Use current rendered sequence":
+                    frames = st.session_state.last_render_frames[: int(align_max_frames)]
+                    meta = st.session_state.last_render_meta
+                    plate_scale_for_display = meta.plate_arcsec_per_pix if meta is not None else None
+                else:
+                    frames, meta = render_frame_sequence(stats, imaging, target, render_opts, align_duration, int(align_max_frames))
+                    plate_scale_for_display = meta.plate_arcsec_per_pix
                 result = align_target_centroid(
                     frames,
                     reference_index=int(reference_index),
@@ -446,17 +479,18 @@ with tabs[4]:
                 )
                 st.session_state.alignment_result = result
                 st.session_state.alignment_meta = meta
+                st.session_state.alignment_plate_scale = plate_scale_for_display
                 st.session_state.aligned_gif = frames_to_gif_bytes(
                     result.aligned_frames,
                     render_opts,
                     fps=align_fps,
-                    plate_arcsec_per_pix=meta.plate_arcsec_per_pix,
+                    plate_arcsec_per_pix=plate_scale_for_display,
                 )
-                st.session_state.aligned_stack_png = frame_png(result.stack, render_opts, meta.plate_arcsec_per_pix)
+                st.session_state.aligned_stack_png = frame_png(result.stack, render_opts, plate_scale_for_display)
 
         result = st.session_state.alignment_result
-        meta = st.session_state.alignment_meta
-        if result is not None and meta is not None:
+        plate_scale_for_display = st.session_state.get("alignment_plate_scale")
+        if result is not None:
             n_frames = result.original_frames.shape[0]
             frame_idx = st.slider("Frame", min_value=0, max_value=n_frames - 1, value=0, step=1)
             row = {
@@ -476,14 +510,14 @@ with tabs[4]:
                         result.original_frames[frame_idx],
                         tuple(result.centroids_xy[frame_idx]),
                         render_opts,
-                        meta.plate_arcsec_per_pix,
+                        plate_scale_for_display,
                     ),
                     caption="Original frame with centroid",
                     width="stretch",
                 )
             with mid:
                 st.image(
-                    frame_png(result.aligned_frames[frame_idx], render_opts, meta.plate_arcsec_per_pix),
+                    frame_png(result.aligned_frames[frame_idx], render_opts, plate_scale_for_display),
                     caption="Aligned frame",
                     width="stretch",
                 )
