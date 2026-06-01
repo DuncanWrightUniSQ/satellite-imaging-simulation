@@ -264,19 +264,19 @@ with tabs[1]:
     c1, c2, c3 = st.columns(3, gap="large")
     with c1:
         st.subheader("Telescope")
-        aperture_m = st.number_input("Aperture (m)", min_value=0.01, value=0.20, step=0.01)
-        f_number = st.number_input("F-number", min_value=0.5, value=8.0, step=0.5)
-        airy_fwhm_um = st.number_input("PSF FWHM (um)", min_value=0.1, value=11.0, step=0.5)
+        aperture_m = st.number_input("Aperture (m)", min_value=0.01, value=0.20, step=0.01, key="payload_aperture_m")
+        f_number = st.number_input("F-number", min_value=0.5, value=12.5, step=0.5, key="payload_f_number")
+        airy_fwhm_um = st.number_input("PSF FWHM (um)", min_value=0.1, value=11.0, step=0.5, key="payload_airy_fwhm_um")
     with c2:
         st.subheader("Sensor")
-        nx = st.number_input("Sensor width Nx (px)", min_value=16, value=1600, step=128)
-        ny = st.number_input("Sensor height Ny (px)", min_value=16, value=1200, step=128)
-        pixel_pitch_um = st.number_input("Pixel pitch (um)", min_value=0.1, value=4.6, step=0.1)
+        nx = st.number_input("Sensor width Nx (px)", min_value=16, value=1600, step=128, key="payload_nx")
+        ny = st.number_input("Sensor height Ny (px)", min_value=16, value=1200, step=128, key="payload_ny")
+        pixel_pitch_um = st.number_input("Pixel pitch (um)", min_value=0.1, value=5.5, step=0.1, key="payload_pixel_pitch_um")
     with c3:
         st.subheader("Detector")
-        qe = st.slider("Quantum efficiency", min_value=0.0, max_value=1.0, value=0.80, step=0.01)
-        read_noise = st.number_input("Read noise (e- RMS)", min_value=0.0, value=0.9, step=0.1)
-        sky_mag = st.number_input("Sky brightness (mag/arcsec^2)", min_value=5.0, max_value=30.0, value=22.0, step=0.1)
+        qe = st.slider("Quantum efficiency", min_value=0.0, max_value=1.0, value=0.60, step=0.01, key="payload_qe")
+        read_noise = st.number_input("Read noise (e- RMS)", min_value=0.0, value=2.5, step=0.1, key="payload_read_noise")
+        sky_mag = st.number_input("Sky brightness (mag/arcsec^2)", min_value=5.0, max_value=30.0, value=20.0, step=0.1, key="payload_sky_mag")
     focal_length_m = aperture_m * f_number
     plate_scale = _plate_scale_arcsec_per_pix(aperture_m, f_number, pixel_pitch_um)
     rayleigh = _rayleigh_arcsec(aperture_m)
@@ -290,8 +290,18 @@ with tabs[2]:
     c1, c2, c3 = st.columns(3, gap="large")
     with c1:
         st.subheader("Field Center")
-        ra_input = st.text_input("RA (deg or HH MM SS.SS)", value="84.0", help="Use decimal degrees, or hours minutes seconds with spaces or colons.")
-        dec_input = st.text_input("Dec (deg or DD MM SS.SS)", value="-5.0", help="Use decimal degrees, or degrees arcminutes arcseconds with spaces or colons.")
+        ra_input = st.text_input(
+            "RA (deg or HH MM SS.SS)",
+            value="16 07 41",
+            help="Use decimal degrees, or hours minutes seconds with spaces or colons.",
+            key="target_ra_input",
+        )
+        dec_input = st.text_input(
+            "Dec (deg or DD MM SS.SS)",
+            value="-33 14 57",
+            help="Use decimal degrees, or degrees arcminutes arcseconds with spaces or colons.",
+            key="target_dec_input",
+        )
         target_valid = True
         try:
             ra_deg = _parse_ra(ra_input)
@@ -310,10 +320,11 @@ with tabs[2]:
         catalog_source = st.selectbox(
             "Star source",
             ["Auto: APASS then Gaia", "APASS", "Gaia", "Synthetic offline"],
-            index=0,
+            index=2,
             help="These catalogs will be used to determine stars that fall on the image; resolved objects such as galaxies are not considered.",
+            key="target_catalog_source",
         )
-        band_label = st.selectbox("Band", ["V (Johnson-Cousins visual band)", "G (Gaia optical broad band)"], index=0)
+        band_label = st.selectbox("Band", ["V (Johnson-Cousins visual band)", "G (Gaia optical broad band)"], index=0, key="target_band_label")
         band = _band_code(band_label)
         mag_limit = st.number_input(
             "Magnitude limit",
@@ -322,6 +333,7 @@ with tabs[2]:
             value=18.0,
             step=0.5,
             help="Stars fainter than this will not be considered in rendering the image.",
+            key="target_mag_limit",
         )
     with c3:
         st.subheader("Synthetic Fallback")
@@ -332,6 +344,7 @@ with tabs[2]:
             value=350,
             step=50,
             help="Number of artificial stars generated when using Synthetic offline or when online catalog queries fail.",
+            key="target_synthetic_count",
         )
         synthetic_seed = st.number_input(
             "Synthetic seed",
@@ -340,6 +353,7 @@ with tabs[2]:
             value=11,
             step=1,
             help="Random seed for the synthetic fallback field, allowing repeatable demo fields.",
+            key="target_synthetic_seed",
         )
 
 with tabs[3]:
